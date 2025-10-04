@@ -1,6 +1,6 @@
-package com.mx_wj.fixtconstructpickaxe.mixin.plugins;
+package com.mx_wj.fixtconstructpickaxe.plugins;
 
-import com.mx_wj.fixtconstructpickaxe.mixin.utils.FixTconstructPickaxeClassInfo;
+import com.mx_wj.fixtconstructpickaxe.utils.FixTconstructPickaxeClassInfo;
 import cpw.mods.modlauncher.api.NamedPath;
 import cpw.mods.modlauncher.serviceapi.ILaunchPluginService;
 import org.apache.logging.log4j.LogManager;
@@ -29,12 +29,14 @@ public class FixTconstructPickaxePlugin implements ILaunchPluginService {
 
     @Override
     public void initializeLaunch(ILaunchPluginService.ITransformerLoader transformerLoader, NamedPath[] specialPaths) {
-        FixTconstructPickaxeClassInfo.setITransformerLoader(transformerLoader);
     }
 
     @Override
     public boolean processClass(final Phase phase, ClassNode classNode, final Type classType, String reason) {
         if(!reason.equals("classloading")){
+            return false;
+        }
+        if(classType.getClassName().startsWith("com.mx_wj.fixtconstructpickaxe")){
             return false;
         }
         String className = classType.getClassName().replace("/", ".");

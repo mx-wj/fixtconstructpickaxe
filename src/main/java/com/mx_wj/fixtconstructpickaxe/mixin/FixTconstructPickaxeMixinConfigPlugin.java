@@ -1,6 +1,6 @@
 package com.mx_wj.fixtconstructpickaxe.mixin;
 
-import com.mx_wj.fixtconstructpickaxe.mixin.plugins.FixTconstructPickaxePlugin;
+import com.mx_wj.fixtconstructpickaxe.plugins.FixTconstructPickaxePlugin;
 import cpw.mods.modlauncher.LaunchPluginHandler;
 import cpw.mods.modlauncher.Launcher;
 import cpw.mods.modlauncher.serviceapi.ILaunchPluginService;
