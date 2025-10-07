@@ -4,7 +4,7 @@
 
 ## 解决了什么问题？
 
-在原版 Minecraft 和许多模组中，对方块（Block）的采集行为通常会检查玩家手中的工具是否是 `PickaxeItem`（镐子物品）的实例，并获取其挖掘等级（Tier）。
+在许多模组中，对方块（Block）的采集行为通常会检查玩家手中的工具是否是 `PickaxeItem`（镐子物品）的实例，并获取其挖掘等级（Tier）。
 
 然而，匠魂的工具（例如镐子）为了实现其高度的可定制性，并没有直接继承原版的 `PickaxeItem` 类。这导致当其他模组通过 `instanceof PickaxeItem` 来判断工具类型时，匠魂的镐子无法被识别，从而可能导致一些兼容性问题或功能失效。
 
@@ -12,36 +12,80 @@
 
 ## 技术实现
 
-该模组通过在 Minecraft 启动早期注入一个核心服务（Coremod/Launch Plugin），利用 ASM 字节码操作技术动态修改游戏中所有方块（`Block`）的逻辑，以实现对匠魂（Tinkers' Construct）工具更好的兼容性。
+本模组采用了一种底层的 Coremod（核心模组）方案，通过在游戏启动时注入一个启动插件（Launch Plugin），来动态修改所有方块（`Block`）的工具采集逻辑。这种方式避免了使用大量 Mixin 注解，实现了对整个游戏的全局性修复。
 
-### 1. 核心插件注入
+### ASM 字节码修改核心
 
-模组的入口点是 `FixTconstructPickaxeMixinConfigPlugin` 类，它实现了 Mixin 的 `IMixinConfigPlugin` 接口。
+所有核心逻辑均在 `FixTconstructPickaxePlugin` 的 `processClass` 方法中实现。当一个继承自 `net.minecraft.world.level.block.Block` 的类被加载时，插件会使用 ASM 库对 `canHarvestBlock` 方法的字节码指令流进行精确的“外科手术式”修改。
 
-- 在 `onLoad` 方法中，该插件并未使用 Mixin 的常规功能，而是通过 Java 反射访问 ModLauncher 的内部字段。
-- 它获取到 `Launcher.INSTANCE` 中的 `launchPlugins` 处理器，并向其中的 `plugins` 列表中添加了一个自定义的核心服务 `FixTconstructPickaxePlugin`。
-- 这种方式使得该模组的核心逻辑能够在非常早期的游戏加载阶段（类加载之前）被激活，从而获得修改所有类字节码的权限。
+**1. 识别目标字节码**
 
-### 2. 类扫描与定位
+插件首先会扫描 `canHarvestBlock` 方法，寻找原版游戏中写死的工具检查逻辑。以下是该逻辑的一个典型示例：
 
-注入的 `FixTconstructPickaxePlugin` 实现了 `ILaunchPluginService` 接口，是执行字节码修改的核心。
+```
+// ... (获取 ItemStack 和 Item)
+// 【问题所在】只认识原版镐子
+INSTANCEOF net/minecraft/world/item/PickaxeItem
+IFEQ E  
 
-- 该插件在 `handlesClass` 方法中声明它将处理 `BEFORE` 阶段的类，即在类被 JVM 定义之前的原始字节码状态。
-- 核心逻辑位于 `processClass` 方法。为了在早期加载阶段安全地获取类的继承信息，模组使用了一个自定义工具类 `FixTconstructPickaxeClassInfo`。这个工具类通过 `MixinService` 直接读取类的字节码来分析其父类，避免了在类未完全加载时使用反射可能引发的问题。
-- 它的目标是所有继承了 `net.minecraft.world.level.block.Block` 的类。
+// 【问题所在】强制类型转换和特定方法调用
+ALOAD Item   // 加载 Item
+CHECKCAST net/minecraft/world/item/PickaxeItem
+ASTORE tieredItem // tieredItem 变量现在是 PickaxeItem 类型
 
-### 3. 动态字节码修改 (ASM)
+ALOAD tieredItem // 加载 PickaxeItem
+INVOKEVIRTUAL net/minecraft/world/item/PickaxeItem.m_43314_()Lnet/minecraft/world/item/Tier; // 调用 getTier() 方法
+// 栈顶现在是 Tier 对象
+...
+```
 
-当插件定位到一个 `Block` 的子类后，它会使用 ASM 库遍历该类的所有方法，寻找名为 `canHarvestBlock` 的方法。一旦找到，它会直接修改该方法的字节码指令流：
+**2. 栈操作与变量保存 (准备工作)**
 
-1.  **替换 `instanceof PickaxeItem`**
-    -   插件会搜索 `INSTANCEOF net/minecraft/world/item/PickaxeItem` 这条指令。
-    -   它将这条指令替换为一个静态方法调用：`INVOKESTATIC com/mx_wj/fixtconstructpickaxe/core/EventUtils.isPickaxe`。
+为了让我们后续的 `getTiered` 方法能获取到完整的 `ItemStack` 对象（而不是 `Item`），插件会在调用 `getItem()` 之前，插入 `DUP` 和 `ASTORE` 指令，将 `ItemStack` 对象的引用复制并保存到一个新的局部变量中。
 
-2.  **替换类型转换与等级获取**
-    -   它会搜索 `CHECKCAST net/minecraft/world/item/PickaxeItem` （将物品强制转换为镐子）这条指令。
-    -   这条指令被替换为另一个静态方法调用：`INVOKESTATIC com/mx_wj/fixtconstructpickaxe/core/EventUtils.getTiered`。
-    -   紧随原版逻辑中对 `PickaxeItem.getTier()` 的调用指令 (`INVOKEVIRTUAL net/minecraft/world/item/PickaxeItem.m_43314_`) 会被直接移除。
+**3. 替换工具类型检查 (`INSTANCEOF`)**
+
+插件会精确定位到 `INSTANCEOF net/minecraft/world/item/PickaxeItem` 这条指令，并将其替换为一个全新的方法调用指令：`INVOKESTATIC com/mx_wj/fixtconstructpickaxe/core/EventUtils.isPickaxe(...)`。这一步将检查逻辑通用化。
+
+**4. 替换并优化挖掘等级获取逻辑 (关键步骤)**
+
+这是整个修改中最核心的部分，分为\*\*“替换”**和**“移除”\*\*两步：
+
+* **第一步：替换 `CHECKCAST`**
+
+    * 插件找到 `CHECKCAST net/minecraft/world/item/PickaxeItem` 指令。
+    * 它将这条指令**替换**为静态方法调用 `INVOKESTATIC com/mx_wj/fixtconstructpickaxe/core/EventUtils.getTiered(...)`。
+    * 同时，在此之前，原先加载 `Item` 的 `ALOAD Item` 指令，会被修改为加载**第 2 步**中保存的 `ItemStack` 变量的指令，以满足 `getTiered` 方法的参数要求。
+    * **此时，字节码变为：**
+      ```
+      // ...
+      ALOAD ItemStack
+      INVOKESTATIC com/mx_wj/fixtconstructpickaxe/core/EventUtils.getTiered(...) // 调用 getTiered()
+      ASTORE tieredItem // tieredItem 变量现在直接是 Tier 类型了！
+      ```
+
+* **第二步：移除冗余的 `getTier()` 调用**
+
+    * 此时 `tieredItem` 变量里已经直接是 `Tier` 对象了。原版代码后续的 `ALOAD tieredItem` 和 `INVOKEVIRTUAL PickaxeItem.m_43314_()` (`getTier()`) 就完全是多余且错误的。
+    * 因此，插件会继续扫描，找到这条 `INVOKEVIRTUAL ... PickaxeItem.m_43314_()` 指令，并将其从方法的指令列表中**彻底移除**。
+
+**最终效果对比**
+
+* **修改前**:
+  ```
+  CHECKCAST PickaxeItem  // 转换成 PickaxeItem
+  ASTORE tieredItem
+  ALOAD tieredItem
+  INVOKEVIRTUAL PickaxeItem.getTier() // 再从 PickaxeItem 获取 Tier
+  ```
+* **修改后**:
+  ```
+  INVOKESTATIC EventUtils.getTiered() // 直接获取 Tier
+  ASTORE tieredItem
+  ALOAD tieredItem  // 直接加载 Tier，后面不再有 getTier() 调用
+  ```
+
+通过这一系列字节码替换和移除操作，代码逻辑被重构，使得后续获取挖掘等级 (`Tier.m_6604_()`) 的代码可以直接使用 `tieredItem` 变量，使得匠魂的镐子也能被正确识别。
 
 ### 4. 通用工具判断逻辑
 
@@ -57,7 +101,7 @@
     -   如果物品实现了匠魂的 `IModifiable` 接口，它会通过匠魂的 `ToolStack` API 来获取工具的 `HARVEST_TIER` 等级。
     -   如果工具不属于以上任何一种，则返回一个不会导致崩溃的空等级（`EMPTY_TIER`）。
 
-通过以上步骤，该模组在不使用任何 Mixin 注解的情况下，实现了对游戏中所有方块收获逻辑的通用性修复，从根本上解决了匠魂工具因不继承 `PickaxeItem` 而导致的兼容性问题。
+通过以上步骤，该模组在不使用任何 Mixin 注解的情况下，实现了对游戏中部分模组方块收获逻辑的通用性修复，从解决了匠魂工具因不继承 `PickaxeItem` 而导致的兼容性问题。
 
 ## 如何构建
 
